@@ -10,8 +10,8 @@ echo "🎵 SoulSync Home Assistant Addon Starting..."
 OPTIONS_FILE="/data/options.json"
 
 if [ -f "${OPTIONS_FILE}" ]; then
-    TIMEZONE=$(jq -r '.timezone // "Europe/Brussels"' "${OPTIONS_FILE}")
-    LOG_LEVEL=$(jq -r '.log_level // "info"' "${OPTIONS_FILE}")
+    TIMEZONE=$(python3 -c "import json,sys; d=json.load(open('${OPTIONS_FILE}')); print(d.get('timezone','Europe/Brussels'))")
+    LOG_LEVEL=$(python3 -c "import json,sys; d=json.load(open('${OPTIONS_FILE}')); print(d.get('log_level','info'))")
 else
     TIMEZONE="Europe/Brussels"
     LOG_LEVEL="info"

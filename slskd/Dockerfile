@@ -4,9 +4,7 @@ FROM ${BUILD_FROM}
 # Switch to root to install jq (image may run as non-root)
 USER root
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends jq \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache jq
 
 COPY run.sh /run.sh
 RUN chmod +x /run.sh
