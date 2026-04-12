@@ -19,7 +19,7 @@ services:
       # Optional: Configure through environment variables
       - SOULSYNC_CONFIG_PATH=/app/config/config.json
       # Set timezone (change to your timezone)
-      - TZ=America/New_York
+      - TZ=Europe/Brussels
     ports:
       - "8008:8008" # Main web app
       - "8888:8888" # Spotify OAuth callback
@@ -70,19 +70,19 @@ services:
   ## After starting, set your SoulSync slskd URL to http://slskd:5030
   ## and the API key to whatever you set in SLSKD_API_KEY below.
   #
-  # slskd:
-  #   image: slskd/slskd:latest
-  #   container_name: slskd
-  #   environment:
-  #     - SLSKD_REMOTE_CONFIGURATION=true
-  #     - SLSKD_API_KEY=your-api-key-here
-  #     - TZ=America/New_York
-  #   ports:
-  #     - "5030:5030"
-  #   volumes:
-  #     - ./slskd-data:/app
-  #     - ./downloads:/app/downloads
-  #   restart: unless-stopped
+  slskd:
+    image: slskd/slskd:latest
+    container_name: slskd
+    environment:
+      - SLSKD_REMOTE_CONFIGURATION=true
+      - SLSKD_API_KEY=your-api-key-here
+      - TZ=Europe/Brussels
+    ports:
+      - "5030:5030"
+    volumes:
+      - ./slskd-data:/app
+      - ./downloads:/app/downloads
+    restart: unless-stopped
 
 # Named volumes for persistent data
 volumes:
