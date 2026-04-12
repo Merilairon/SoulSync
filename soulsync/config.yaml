@@ -1,0 +1,51 @@
+name: "SoulSync"
+version: "2.2.0"
+slug: "soulsync"
+description: "Intelligent music discovery and automation platform — bridges Spotify to your local media server."
+url: "https://github.com/baetensjan/SoulSync"
+
+# Supported architectures
+arch:
+  - aarch64
+  - amd64
+
+# Startup behaviour
+startup: application
+boot: auto
+init: false
+
+# Home Assistant integration
+homeassistant_api: false
+hassio_api: false
+auth_api: false
+
+# Ingress — main UI accessible via HA sidebar
+ingress: true
+ingress_port: 8008
+panel_icon: "mdi:music-note-outline"
+panel_title: "SoulSync"
+
+# Optional ports (enable in addon settings when needed)
+# 8888 and 8889 must be reachable by Spotify/Tidal servers for OAuth callbacks.
+ports:
+  8888/tcp: 8888
+  8889/tcp: 8889
+ports_description:
+  8888/tcp: "Spotify OAuth callback"
+  8889/tcp: "Tidal OAuth callback"
+
+# Volume mounts
+#   /share  → /share  (shared HA storage — downloads land here)
+#   /media  → /media  (HA media directory — transfer/music destination)
+map:
+  - share:rw
+  - media:rw
+
+# User-configurable options (set in the addon's Configuration tab)
+options:
+  timezone: "Europe/Brussels"
+  log_level: "info"
+
+schema:
+  timezone: str
+  log_level: list(trace|debug|info|notice|warning|error|fatal)

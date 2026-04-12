@@ -1,0 +1,39 @@
+name: "slskd (Soulseek)"
+version: "1.0.0"
+slug: "slskd"
+description: "slskd — Soulseek client. Pairs with SoulSync; downloads land in /share/soulsync/downloads."
+url: "https://github.com/baetensjan/SoulSync"
+
+arch:
+  - aarch64
+  - amd64
+
+startup: application
+boot: auto
+init: false
+
+homeassistant_api: false
+hassio_api: false
+auth_api: false
+
+# Ingress — slskd Web UI accessible via HA sidebar
+ingress: true
+ingress_port: 5030
+panel_icon: "mdi:cloud-download-outline"
+panel_title: "slskd"
+
+# Volume mounts
+#   /share → shared HA storage (downloads written here, SoulSync reads the same path)
+map:
+  - share:rw
+
+# User-configurable options
+options:
+  api_key: "change-me-to-a-secret-key"
+  timezone: "Europe/Brussels"
+  remote_configuration: true
+
+schema:
+  api_key: str
+  timezone: str
+  remote_configuration: bool
