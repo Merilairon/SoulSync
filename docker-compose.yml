@@ -34,7 +34,7 @@ services:
       - ./scripts:/app/scripts
       # Use named volume for database persistence (separate from host database)
       # NOTE: Changed from /app/database to /app/data to avoid overwriting Python package
-      - soulsync_database:/app/data
+      - ./soulsync_database:/app/data
       # IMPORTANT: Mount host paths that your download/transfer folders live on.
       # Replace these examples with your actual paths:
       #   Linux/Mac:  - /path/to/your/downloads:/host/downloads:rw
@@ -85,9 +85,9 @@ services:
     restart: unless-stopped
 
 # Named volumes for persistent data
-volumes:
-  soulsync_database:
-    driver: local
+#volumes:
+#  soulsync_database:
+#    driver: local
 
 # Optional: Add external network for communication with other containers
 networks:
