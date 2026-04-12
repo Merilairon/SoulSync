@@ -1,5 +1,5 @@
 name: "slskd (Soulseek)"
-version: "1.0.1"
+version: "1.0.2"
 slug: "slskd"
 description: "slskd — Soulseek client. Pairs with SoulSync; downloads land in /share/soulsync/downloads."
 url: "https://github.com/baetensjan/SoulSync"

@@ -1,8 +1,16 @@
 #!/bin/bash
 # SoulSync – Home Assistant Addon Entrypoint
 # Reads options from /data/options.json (provided by HA Supervisor) and starts SoulSync.
+# Uses only grep/sed — no jq required.
 
 set -e
+
+# Helper: extract a string value from flat JSON without jq
+json_get() {
+    grep -o "\"$1\" *: *\"[^\"]*\"" "${OPTIONS_FILE}" 2>/dev/null \
+        | sed 's/.*: *"\(.*\)"/\1/' \
+        | head -1
+}
 
 echo "🎵 SoulSync Home Assistant Addon Starting..."
 
@@ -10,8 +18,10 @@ echo "🎵 SoulSync Home Assistant Addon Starting..."
 OPTIONS_FILE="/data/options.json"
 
 if [ -f "${OPTIONS_FILE}" ]; then
-    TIMEZONE=$(python3 -c "import json,sys; d=json.load(open('${OPTIONS_FILE}')); print(d.get('timezone','Europe/Brussels'))")
-    LOG_LEVEL=$(python3 -c "import json,sys; d=json.load(open('${OPTIONS_FILE}')); print(d.get('log_level','info'))")
+    TIMEZONE=$(json_get "timezone")
+    LOG_LEVEL=$(json_get "log_level")
+    TIMEZONE="${TIMEZONE:-Europe/Brussels}"
+    LOG_LEVEL="${LOG_LEVEL:-info}"
 else
     TIMEZONE="Europe/Brussels"
     LOG_LEVEL="info"

@@ -1,10 +1,8 @@
 ARG BUILD_FROM=slskd/slskd:latest
 FROM ${BUILD_FROM}
 
-# Switch to root to install jq (image may run as non-root)
+# Switch to root so we can write the entrypoint script
 USER root
-
-RUN apk add --no-cache jq
 
 COPY run.sh /run.sh
 RUN chmod +x /run.sh
