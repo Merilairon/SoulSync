@@ -2069,7 +2069,7 @@ class RepairWorker:
                     'source': current_source or 'spotify',
                     'source_track_id': item.get('id', ''),
                     'track_id': item.get('id', ''),
-                    'spotify_track_id': item.get('id', ''),
+                    'spotify_track_id': item.get('id', '') if (current_source or 'spotify') == 'spotify' else '',
                     'duration_ms': item.get('duration_ms', 0),
                     'artists': track_artists,
                 })

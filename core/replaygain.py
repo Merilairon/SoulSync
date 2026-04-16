@@ -108,9 +108,12 @@ def format_gain(lufs: float, reference: float = RG_REFERENCE_LUFS) -> str:
 
 
 def format_peak(true_peak_dbfs: float) -> str:
-    """Convert a true peak in dBFS to a linear peak string like '0.987654'."""
+    """Convert a true peak in dBFS to a linear peak string like '0.987654'.
+
+    Values above 0 dBFS (linear > 1.0) are preserved as-is; no clamping is
+    applied so that clipping information is not silently lost.
+    """
     linear = 10 ** (true_peak_dbfs / 20.0)
-    # Clamp to [0, 1] — values above 0 dBFS (>1.0) are kept as-is (clipping)
     return f"{linear:.6f}"
 
 
