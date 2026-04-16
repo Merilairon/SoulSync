@@ -18,6 +18,11 @@ from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from core.metadata_service import (
+    get_album_tracks_for_source,
+    get_source_priority,
+    get_primary_source,
+)
 from core.repair_jobs import get_all_jobs
 from core.repair_jobs.base import JobContext, JobResult, RepairJob
 from utils.logging_config import get_logger
@@ -67,6 +72,7 @@ class RepairWorker:
         self.running = False
         self.enabled = False  # Master toggle (replaces 'paused')
         self.should_stop = False
+        self._stop_event = threading.Event()
         self.thread = None
 
         # Current job being executed
@@ -103,7 +109,6 @@ class RepairWorker:
         self._on_job_finish = None   # (job_id, status, result) -> None
 
         # Lazy client accessors
-        self._spotify_client = None
         self._itunes_client = None
         self._mb_client = None
         self._acoustid_client = None
@@ -149,13 +154,12 @@ class RepairWorker:
     # ------------------------------------------------------------------
     @property
     def spotify_client(self):
-        if self._spotify_client is None:
-            try:
-                from core.spotify_client import SpotifyClient
-                self._spotify_client = SpotifyClient()
-            except Exception as e:
-                logger.error("Failed to initialize SpotifyClient: %s", e)
-        return self._spotify_client
+        try:
+            from core.metadata_service import get_client_for_source
+            return get_client_for_source('spotify')
+        except Exception as e:
+            logger.error("Failed to resolve shared Spotify client: %s", e)
+            return None
 
     @property
     def itunes_client(self):
@@ -293,6 +297,7 @@ class RepairWorker:
             return
         self.running = True
         self.should_stop = False
+        self._stop_event.clear()
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
         logger.info("Repair worker started")
@@ -303,8 +308,9 @@ class RepairWorker:
         logger.info("Stopping repair worker...")
         self.should_stop = True
         self.running = False
+        self._stop_event.set()
         if self.thread:
-            self.thread.join(timeout=5)
+            self.thread.join(timeout=2)
         logger.info("Repair worker stopped")
 
     def toggle(self) -> bool:
@@ -418,7 +424,7 @@ class RepairWorker:
         logger.info("Repair worker thread started")
         self._ensure_jobs_loaded()
 
-        while not self.should_stop:
+        while not self._stop_event.is_set():
             try:
                 # Check force-run queue even when disabled (user explicitly requested)
                 forced_job = None
@@ -428,13 +434,15 @@ class RepairWorker:
 
                 if forced_job:
                     self._run_job(forced_job)
-                    time.sleep(2)
+                    if self._sleep_or_stop(2):
+                        break
                     continue
 
                 if not self.enabled:
                     self._current_job_id = None
                     self._current_job_name = None
-                    time.sleep(2)
+                    if self._sleep_or_stop(2):
+                        break
                     continue
 
                 # Find the next job to run based on staleness
@@ -444,20 +452,23 @@ class RepairWorker:
                     # Nothing due — sleep and re-check
                     self._current_job_id = None
                     self._current_job_name = None
-                    time.sleep(10)
+                    if self._sleep_or_stop(10):
+                        break
                     continue
 
                 # Run the selected job
                 self._run_job(next_job)
 
                 # Brief pause between jobs
-                time.sleep(5)
+                if self._sleep_or_stop(5):
+                    break
 
             except Exception as e:
                 logger.error("Error in repair worker loop: %s", e, exc_info=True)
                 self._current_job_id = None
                 self._current_job_name = None
-                time.sleep(30)
+                if self._sleep_or_stop(30):
+                    break
 
         logger.info("Repair worker thread finished")
 
@@ -552,6 +563,7 @@ class RepairWorker:
             metadata_cache=self.metadata_cache,
             create_finding=self._create_finding,
             should_stop=lambda: self.should_stop,
+            stop_event=self._stop_event,
             is_paused=lambda: not self.enabled,
             update_progress=self._update_progress,
             report_progress=_report_progress,
@@ -594,6 +606,17 @@ class RepairWorker:
         self._current_job_id = None
         self._current_job_name = None
         self._current_progress = {'scanned': 0, 'total': 0, 'percent': 0}
+
+    def _sleep_or_stop(self, seconds: float, step: float = 0.2) -> bool:
+        """Sleep in small chunks so shutdown interrupts quickly."""
+        if seconds <= 0:
+            return self._stop_event.is_set()
+        remaining = seconds
+        while remaining > 0 and not self._stop_event.is_set():
+            chunk = min(step, remaining)
+            self._stop_event.wait(chunk)
+            remaining -= chunk
+        return self._stop_event.is_set()
 
     def run_job_now(self, job_id: str):
         """Queue a job for immediate execution by the main worker loop.
@@ -817,6 +840,7 @@ class RepairWorker:
             'missing_lossy_copy': self._fix_missing_lossy_copy,
             'unwanted_content': self._fix_unwanted_content,
             'unknown_artist': self._fix_unknown_artist,
+            'acoustid_mismatch': self._fix_acoustid_mismatch,
         }
         handler = handlers.get(finding_type)
         if not handler:
@@ -1486,6 +1510,108 @@ class RepairWorker:
         return {'success': True, 'action': 'fixed_unknown_artist',
                 'message': f'Fixed: {corrected_artist} - {corrected_title}'}
 
+    def _fix_acoustid_mismatch(self, entity_type, entity_id, file_path, details):
+        """Fix an AcoustID mismatch. Actions:
+           'retag' (default): Update DB title/artist to match the actual audio content
+           'redownload': Add the expected (correct) track to wishlist and delete the wrong file
+           'delete': Just delete the wrong file and DB record
+        """
+        fix_action = details.get('_fix_action', 'retag')
+        track_id = entity_id
+
+        if fix_action == 'delete':
+            # Delete file + DB record
+            if file_path:
+                resolved = _resolve_file_path(file_path, self.transfer_folder)
+                if resolved and os.path.exists(resolved):
+                    try:
+                        os.remove(resolved)
+                    except Exception as e:
+                        logger.warning("Could not delete file %s: %s", resolved, e)
+            if track_id:
+                try:
+                    conn = self.db._get_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("DELETE FROM tracks WHERE id = ?", (track_id,))
+                    conn.commit()
+                    conn.close()
+                except Exception as e:
+                    return {'success': False, 'error': f'DB delete failed: {e}'}
+            return {'success': True, 'action': 'deleted',
+                    'message': f'Deleted wrong file: {os.path.basename(file_path or "")}'}
+
+        if fix_action == 'redownload':
+            # Add expected track to wishlist, then delete the wrong file
+            expected_title = details.get('expected_title', '')
+            expected_artist = details.get('expected_artist', '')
+            album_title = details.get('album_title', '')
+            if expected_title and expected_artist:
+                try:
+                    import json, uuid
+                    track_data = {
+                        'id': f'acoustid_fix_{uuid.uuid4().hex[:8]}',
+                        'name': expected_title,
+                        'artists': [{'name': expected_artist}],
+                        'album': {'name': album_title} if album_title else {'name': expected_title},
+                    }
+                    self.db.add_to_wishlist(
+                        spotify_track_data=track_data,
+                        failure_reason='AcoustID mismatch — re-downloading correct track',
+                        source_type='repair',
+                    )
+                    logger.info("Added '%s' by '%s' to wishlist for re-download",
+                                expected_title, expected_artist)
+                except Exception as e:
+                    logger.warning("Could not add to wishlist: %s", e)
+            # Delete wrong file
+            if file_path:
+                resolved = _resolve_file_path(file_path, self.transfer_folder)
+                if resolved and os.path.exists(resolved):
+                    try:
+                        os.remove(resolved)
+                    except Exception:
+                        pass
+            if track_id:
+                try:
+                    conn = self.db._get_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("DELETE FROM tracks WHERE id = ?", (track_id,))
+                    conn.commit()
+                    conn.close()
+                except Exception:
+                    pass
+            return {'success': True, 'action': 'redownload',
+                    'message': f'Added "{expected_title}" to wishlist, removed wrong file'}
+
+        # Default: retag — update DB record to match the actual audio content
+        aid_title = details.get('acoustid_title', '')
+        aid_artist = details.get('acoustid_artist', '')
+        if not aid_title:
+            return {'success': False, 'error': 'No AcoustID title available to retag'}
+
+        try:
+            conn = self.db._get_connection()
+            cursor = conn.cursor()
+            # Update track title
+            cursor.execute("UPDATE tracks SET title = ? WHERE id = ?", (aid_title, track_id))
+            # Update artist if we have one and it differs
+            if aid_artist:
+                cursor.execute("SELECT id FROM artists WHERE LOWER(name) = LOWER(?)", (aid_artist,))
+                row = cursor.fetchone()
+                if row:
+                    cursor.execute("UPDATE tracks SET artist_id = ? WHERE id = ?", (row[0], track_id))
+                else:
+                    cursor.execute("INSERT INTO artists (name) VALUES (?)", (aid_artist,))
+                    cursor.execute("UPDATE tracks SET artist_id = ? WHERE id = ?",
+                                   (cursor.lastrowid, track_id))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            return {'success': False, 'error': f'DB update failed: {e}'}
+
+        return {'success': True, 'action': 'retagged',
+                'message': f'Updated to: "{aid_title}" by {aid_artist}'}
+
     def _fix_mbid_mismatch(self, entity_type, entity_id, file_path, details):
         """Remove the mismatched MusicBrainz recording ID from the audio file."""
         if not file_path:
@@ -1723,7 +1849,9 @@ class RepairWorker:
             track_number = mt.get('track_number', 0)
             disc_number = mt.get('disc_number', 1)
             track_artists = mt.get('artists', [])
-            spotify_track_id = mt.get('spotify_track_id', '')
+            source = mt.get('source', '') or 'spotify'
+            source_track_id = mt.get('source_track_id', '') or mt.get('track_id', '') or mt.get('spotify_track_id', '')
+            spotify_track_id = mt.get('spotify_track_id', '') or (source_track_id if source == 'spotify' else '')
             artist_search = track_artists[0] if track_artists else artist_name
 
             if not track_name:
@@ -1789,7 +1917,7 @@ class RepairWorker:
                     logger.warning("File operation failed for '%s': %s", track_name, result.get('error'))
 
             # Phase 4: Wishlist fallback
-            if spotify_track_id:
+            if source_track_id:
                 try:
                     # Build album images from finding thumb URL
                     album_images = []
@@ -1798,7 +1926,7 @@ class RepairWorker:
                         album_images = [{'url': album_thumb, 'height': 300, 'width': 300}]
 
                     wishlist_data = {
-                        'id': spotify_track_id,
+                        'id': source_track_id,
                         'name': track_name,
                         'artists': [{'name': a} for a in track_artists] if track_artists else [{'name': artist_name}],
                         'album': {
@@ -1812,6 +1940,7 @@ class RepairWorker:
                         'duration_ms': mt.get('duration_ms', 0),
                         'track_number': track_number,
                         'disc_number': disc_number,
+                        'uri': f"{source}:track:{source_track_id}" if source and source_track_id else '',
                     }
                     source_info = {
                         'album_title': album_title,
@@ -1819,6 +1948,8 @@ class RepairWorker:
                         'track_number': track_number,
                         'disc_number': disc_number,
                         'spotify_album_id': spotify_album_id,
+                        'source': source,
+                        'source_track_id': source_track_id,
                         'is_album': True,
                         'reason': 'album_completeness_auto_fill',
                     }
@@ -1840,7 +1971,7 @@ class RepairWorker:
                     track_details.append({'track': track_name, 'status': 'skipped', 'reason': f'wishlist error: {e}'})
             else:
                 skipped_count += 1
-                track_details.append({'track': track_name, 'status': 'skipped', 'reason': 'no spotify_track_id for wishlist'})
+                track_details.append({'track': track_name, 'status': 'skipped', 'reason': 'no source_track_id for wishlist'})
 
         # Build result message
         parts = []
@@ -1865,11 +1996,18 @@ class RepairWorker:
 
     def _refetch_missing_tracks(self, album_id, details):
         """Re-fetch missing track list from APIs when the stored list is empty."""
+        configured_primary_source = get_primary_source()
         spotify_album_id = details.get('spotify_album_id', '')
         itunes_album_id = details.get('itunes_album_id', '')
         deezer_album_id = details.get('deezer_album_id', '')
-        logger.debug("Refetch missing tracks for album %s: spotify=%s, itunes=%s, deezer=%s",
-                      album_id, spotify_album_id, itunes_album_id, deezer_album_id)
+        discogs_album_id = details.get('discogs_album_id', '')
+        hydrabase_album_id = details.get('hydrabase_album_id', '')
+        primary_source = details.get('primary_source') or configured_primary_source
+        logger.debug(
+            "Refetch missing tracks for album %s: primary=%s spotify=%s itunes=%s deezer=%s discogs=%s hydrabase=%s",
+            album_id, primary_source, spotify_album_id, itunes_album_id, deezer_album_id, discogs_album_id,
+            hydrabase_album_id
+        )
 
         # Get track numbers we already own
         owned_numbers = set()
@@ -1889,32 +2027,27 @@ class RepairWorker:
             if conn:
                 conn.close()
 
-        # Try Spotify first
+        current_source = primary_source
         api_tracks = None
-        if spotify_album_id:
-            try:
-                sp = self.spotify_client
-                if sp and hasattr(sp, 'get_album_tracks'):
-                    api_tracks = sp.get_album_tracks(spotify_album_id)
-            except Exception as e:
-                logger.debug("Refetch: Spotify album tracks failed for %s: %s", spotify_album_id, e)
+        album_sources = {
+            'spotify': spotify_album_id,
+            'itunes': itunes_album_id,
+            'deezer': deezer_album_id,
+            'discogs': discogs_album_id,
+            'hydrabase': hydrabase_album_id,
+        }
 
-        # Try fallback client (iTunes/Deezer)
-        if not api_tracks or 'items' not in (api_tracks or {}):
-            itunes = self.itunes_client
-            if itunes:
-                is_deezer = type(itunes).__name__ == 'DeezerClient'
-                primary_id = deezer_album_id if is_deezer else itunes_album_id
-                secondary_id = itunes_album_id if is_deezer else deezer_album_id
-                for fid in [primary_id, secondary_id]:
-                    if not fid:
-                        continue
-                    try:
-                        api_tracks = itunes.get_album_tracks(fid)
-                        if api_tracks and 'items' in api_tracks:
-                            break
-                    except Exception as e:
-                        logger.debug("Refetch: fallback album tracks failed for %s: %s", fid, e)
+        for source in get_source_priority(primary_source):
+            fid = album_sources.get(source, '')
+            if not fid:
+                continue
+            try:
+                api_tracks = get_album_tracks_for_source(source, fid)
+                if api_tracks and 'items' in (api_tracks or {}):
+                    current_source = source
+                    break
+            except Exception as e:
+                logger.debug("Refetch: %s album tracks failed for %s: %s", source, fid, e)
 
         if not api_tracks or 'items' not in api_tracks:
             return []
@@ -1933,7 +2066,10 @@ class RepairWorker:
                     'track_number': tn,
                     'name': item.get('name', ''),
                     'disc_number': item.get('disc_number', 1),
-                    'spotify_track_id': item.get('id', ''),
+                    'source': current_source or 'spotify',
+                    'source_track_id': item.get('id', ''),
+                    'track_id': item.get('id', ''),
+                    'spotify_track_id': item.get('id', '') if (current_source or 'spotify') == 'spotify' else '',
                     'duration_ms': item.get('duration_ms', 0),
                     'artists': track_artists,
                 })

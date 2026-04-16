@@ -22,3 +22,5 @@ logs/*.log.*
 
 # Auto-downloaded binaries
 bin/
+tools/ffmpeg
+tools/ffprobe

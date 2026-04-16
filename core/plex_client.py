@@ -277,13 +277,13 @@ class PlexClient:
         
         try:
             for playlist in self.server.playlists():
-                if playlist.playlistType == 'audio':
+                if getattr(playlist, 'playlistType', None) == 'audio':
                     playlist_info = PlexPlaylistInfo.from_plex_playlist(playlist)
                     playlists.append(playlist_info)
-            
+
             logger.info(f"Retrieved {len(playlists)} audio playlists")
             return playlists
-            
+
         except Exception as e:
             logger.error(f"Error fetching playlists: {e}")
             return []
@@ -294,7 +294,7 @@ class PlexClient:
         
         try:
             playlist = self.server.playlist(name)
-            if playlist.playlistType == 'audio':
+            if getattr(playlist, 'playlistType', None) == 'audio':
                 return PlexPlaylistInfo.from_plex_playlist(playlist)
             return None
             
@@ -480,19 +480,16 @@ class PlexClient:
             return False
     
     def set_playlist_image(self, playlist_name: str, image_url: str) -> bool:
-        """Set the poster image for a playlist by downloading from a URL."""
+        """Set the poster image for a playlist from a URL."""
         if not self.ensure_connection() or not image_url:
             return False
         try:
             playlist = self.server.playlist(playlist_name)
-            import requests as _req
-            img_resp = _req.get(image_url, timeout=15)
-            if img_resp.ok and img_resp.content:
-                playlist.uploadPoster(data=img_resp.content)
-                logger.info(f"Set playlist poster for '{playlist_name}'")
-                return True
+            playlist.uploadPoster(url=image_url)
+            logger.info(f"Set playlist poster for '{playlist_name}'")
+            return True
         except Exception as e:
-            logger.debug(f"Could not set playlist poster for '{playlist_name}': {e}")
+            logger.warning(f"Could not set playlist poster for '{playlist_name}': {e}")
         return False
 
     def _find_track(self, title: str, artist: str, album: str) -> Optional[PlexTrack]:

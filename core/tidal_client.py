@@ -1,3 +1,4 @@
+import os
 import requests
 import time
 import re
@@ -119,7 +120,12 @@ class TidalClient:
         self.alt_base_url = "https://api.tidal.com/v1"  # Alternative API base
         self.auth_url = "https://login.tidal.com/authorize"
         self.token_url = "https://auth.tidal.com/v1/oauth2/token"
-        self.redirect_uri = "http://127.0.0.1:8889/tidal/callback"  # Default, will be updated from config
+        try:
+            _tidal_port = int(os.environ.get('SOULSYNC_TIDAL_CALLBACK_PORT', 8889))
+        except ValueError:
+            logger.warning("SOULSYNC_TIDAL_CALLBACK_PORT is not a valid integer; falling back to 8889")
+            _tidal_port = 8889
+        self.redirect_uri = f"http://127.0.0.1:{_tidal_port}/tidal/callback"  # Default, will be updated from config
         self.session = requests.Session()
         self.auth_server = None
         self.auth_code = None
@@ -347,7 +353,11 @@ class TidalClient:
                 pass  # Suppress server logs
         
         try:
+            port = int(os.environ.get('SOULSYNC_TIDAL_CALLBACK_PORT', 8889))
+        except ValueError:
+            logger.warning("SOULSYNC_TIDAL_CALLBACK_PORT is not a valid integer; falling back to 8889")
             port = 8889
+        try:
             self.auth_server = HTTPServer(('localhost', port), CallbackHandler)
             server_thread = threading.Thread(target=self.auth_server.serve_forever)
             server_thread.daemon = True
@@ -1178,6 +1188,17 @@ class TidalClient:
                 public=playlist_attrs.get('accessType', '') == "PUBLIC"
             )
 
+            # Extract cover image URL from relationships (same logic as get_user_playlists_metadata_only)
+            try:
+                relationships = playlist_data.get('relationships', {})
+                image_rel = relationships.get('image', {}).get('data', {})
+                if image_rel:
+                    image_id = image_rel.get('id', '')
+                    if image_id:
+                        playlist.image_url = f"https://resources.tidal.com/images/{image_id.replace('-', '/')}/640x640.jpg"
+            except Exception:
+                pass
+
             logger.info(f"Retrieved Tidal playlist '{playlist.name}' with {len(tracks)} tracks")
             return playlist
 
@@ -1495,6 +1516,128 @@ class TidalClient:
             return artists
         except Exception as e:
             logger.error(f"Error fetching Tidal favorite artists: {e}")
+            return []
+
+    def get_favorite_albums(self, limit: int = 200) -> list:
+        """Fetch user's favorite albums from Tidal.
+        Returns list of dicts with tidal_id, album_name, artist_name, image_url, release_date, total_tracks."""
+        try:
+            if not self._ensure_valid_token():
+                logger.debug("Tidal not authenticated — cannot fetch favorite albums")
+                return []
+
+            user_id, api_version = self._get_user_id()
+            if not user_id:
+                logger.warning("Could not get Tidal user ID for favorite albums")
+                return []
+
+            albums = []
+
+            if api_version == 'v2':
+                offset = 0
+                while len(albums) < limit:
+                    try:
+                        headers = self.session.headers.copy()
+                        headers['accept'] = 'application/vnd.api+json'
+                        resp = requests.get(
+                            f"{self.base_url}/favorites",
+                            params={
+                                'countryCode': 'US',
+                                'filter[user.id]': user_id,
+                                'filter[type]': 'ALBUMS',
+                                'include': 'albums',
+                                'page[limit]': min(50, limit - len(albums)),
+                                'page[offset]': offset
+                            },
+                            headers=headers, timeout=15
+                        )
+                        if resp.status_code != 200:
+                            logger.debug(f"Tidal V2 favorite albums returned {resp.status_code}, trying V1")
+                            break
+                        data = resp.json()
+                        included = data.get('included', [])
+                        items = included if included else data.get('data', [])
+                        if not items:
+                            break
+                        for item in items:
+                            if included and item.get('type') not in ('albums', 'album'):
+                                continue
+                            attrs = item.get('attributes', {})
+                            title = attrs.get('title', '')
+                            if not title:
+                                continue
+                            img = None
+                            img_rel = item.get('relationships', {}).get('image', {}).get('data', {})
+                            if isinstance(img_rel, dict) and img_rel.get('id'):
+                                img = f"https://resources.tidal.com/images/{img_rel['id'].replace('-', '/')}/750x750.jpg"
+                            artist_name = ''
+                            artist_rel = attrs.get('artists', [{}])
+                            if artist_rel and isinstance(artist_rel, list):
+                                artist_name = artist_rel[0].get('name', '') if isinstance(artist_rel[0], dict) else ''
+                            albums.append({
+                                'tidal_id': str(item.get('id', '')),
+                                'album_name': title,
+                                'artist_name': artist_name,
+                                'image_url': img,
+                                'release_date': attrs.get('releaseDate', ''),
+                                'total_tracks': attrs.get('numberOfTracks', 0),
+                            })
+                        if not data.get('links', {}).get('next'):
+                            break
+                        offset += 50
+                        import time
+                        time.sleep(0.5)
+                    except Exception as e:
+                        logger.debug(f"Tidal V2 favorite albums error: {e}")
+                        break
+
+            # Fallback to V1 API
+            if not albums:
+                try:
+                    offset = 0
+                    while len(albums) < limit:
+                        resp = self.session.get(
+                            f"{self.alt_base_url}/users/{user_id}/favorites/albums",
+                            params={'countryCode': 'US', 'limit': min(50, limit - len(albums)), 'offset': offset},
+                            timeout=15
+                        )
+                        if resp.status_code != 200:
+                            logger.debug(f"Tidal V1 favorite albums returned {resp.status_code}")
+                            break
+                        data = resp.json()
+                        items = data.get('items', [])
+                        if not items:
+                            break
+                        for item in items:
+                            a = item.get('item', item)
+                            img_id = (a.get('cover') or '').replace('-', '/')
+                            img = f"https://resources.tidal.com/images/{img_id}/750x750.jpg" if img_id else None
+                            artist_name = ''
+                            if isinstance(a.get('artist'), dict):
+                                artist_name = a['artist'].get('name', '')
+                            elif isinstance(a.get('artists'), list) and a['artists']:
+                                artist_name = a['artists'][0].get('name', '')
+                            albums.append({
+                                'tidal_id': str(a.get('id', '')),
+                                'album_name': a.get('title', ''),
+                                'artist_name': artist_name,
+                                'image_url': img,
+                                'release_date': a.get('releaseDate', ''),
+                                'total_tracks': a.get('numberOfTracks', 0),
+                            })
+                        total = data.get('totalNumberOfItems', 0)
+                        offset += len(items)
+                        if offset >= total:
+                            break
+                        import time
+                        time.sleep(0.5)
+                except Exception as e:
+                    logger.debug(f"Tidal V1 favorite albums error: {e}")
+
+            logger.info(f"Retrieved {len(albums)} favorite albums from Tidal")
+            return albums
+        except Exception as e:
+            logger.error(f"Error fetching Tidal favorite albums: {e}")
             return []
 
 # Global instance
