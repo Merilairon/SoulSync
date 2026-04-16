@@ -72,9 +72,21 @@ class Track:
         if isinstance(album_data, dict):
             album_image_url = album_data.get('cover_xl') or album_data.get('cover_big') or album_data.get('cover_medium')
 
-        # Get artist name
+        # Get artist name(s) — use contributors for multi-artist tracks (feat. collabs)
         artist_data = track_data.get('artist', {})
         artist_name = artist_data.get('name', 'Unknown Artist') if isinstance(artist_data, dict) else 'Unknown Artist'
+        contributors = track_data.get('contributors', [])
+        if isinstance(contributors, list) and len(contributors) > 1:
+            artist_names = []
+            for c in contributors:
+                if isinstance(c, dict) and c.get('name'):
+                    artist_names.append(c['name'])
+            if artist_names:
+                all_artists = artist_names
+            else:
+                all_artists = [artist_name]
+        else:
+            all_artists = [artist_name]
 
         # Get album name
         album_name = ''
@@ -102,7 +114,7 @@ class Track:
         return cls(
             id=str(track_data.get('id', '')),
             name=track_data.get('title', ''),
-            artists=[artist_name],
+            artists=all_artists,
             album=album_name,
             duration_ms=track_data.get('duration', 0) * 1000,  # Deezer returns seconds
             popularity=track_data.get('rank', 0),
@@ -416,6 +428,15 @@ class DeezerClient:
         album_name = album_data.get('title', '') if isinstance(album_data, dict) else str(album_data) if album_data else ''
         album_id = str(album_data.get('id', '')) if isinstance(album_data, dict) else ''
 
+        # Use contributors for multi-artist tracks
+        contributors = track_data.get('contributors', [])
+        if isinstance(contributors, list) and len(contributors) > 1:
+            all_artists = [c['name'] for c in contributors if isinstance(c, dict) and c.get('name')]
+            if not all_artists:
+                all_artists = [artist_name]
+        else:
+            all_artists = [artist_name]
+
         return {
             'id': str(track_data.get('id', '')),
             'name': track_data.get('title', ''),
@@ -423,7 +444,7 @@ class DeezerClient:
             'disc_number': track_data.get('disk_number', 1),
             'duration_ms': track_data.get('duration', 0) * 1000,
             'explicit': track_data.get('explicit_lyrics', False),
-            'artists': [artist_name],
+            'artists': all_artists,
             'primary_artist': artist_name,
             'album': {
                 'id': album_id,
@@ -614,26 +635,37 @@ class DeezerClient:
             '_raw_data': artist_data
         }
 
-    def get_artist_albums_list(self, artist_id: str, album_type: str = 'album,single', limit: int = 50) -> List[Album]:
+    def get_artist_albums_list(self, artist_id: str, album_type: str = 'album,single', limit: int = 200) -> List[Album]:
         """Get albums by artist ID — returns Album dataclass list (metadata source interface).
 
-        Matches iTunesClient.get_artist_albums() interface."""
-        data = self._api_get(f'artist/{artist_id}/albums', {'limit': min(limit, 100)})
-        if not data or 'data' not in data:
-            return []
-
+        Matches iTunesClient.get_artist_albums() interface.
+        Paginates through all results up to the requested limit."""
         albums = []
+        all_raw = []
         requested_types = [t.strip() for t in album_type.split(',')]
+        offset = 0
+        page_size = 100  # Deezer API max per request
 
-        for album_data in data['data']:
-            album = Album.from_deezer_album(album_data)
+        while offset < limit:
+            fetch_limit = min(page_size, limit - offset)
+            data = self._api_get(f'artist/{artist_id}/albums', {'limit': fetch_limit, 'index': offset})
+            if not data or 'data' not in data or len(data['data']) == 0:
+                break
 
-            if album_type != 'album,single':
-                if album.album_type not in requested_types:
-                    if not (album.album_type == 'ep' and 'single' in requested_types):
-                        continue
+            for album_data in data['data']:
+                all_raw.append(album_data)
+                album = Album.from_deezer_album(album_data)
 
-            albums.append(album)
+                if album_type != 'album,single':
+                    if album.album_type not in requested_types:
+                        if not (album.album_type == 'ep' and 'single' in requested_types):
+                            continue
+
+                albums.append(album)
+
+            if len(data['data']) < fetch_limit:
+                break  # Last page
+            offset += len(data['data'])
 
         cache = get_metadata_cache()
         # Deezer's /artist/{id}/albums endpoint doesn't include artist info on each album.
@@ -642,7 +674,7 @@ class DeezerClient:
         if albums and albums[0].artists:
             artist_stub = {'id': int(artist_id) if artist_id.isdigit() else 0, 'name': albums[0].artists[0]}
         entries = []
-        for ad in data['data']:
+        for ad in all_raw:
             if ad.get('id'):
                 if artist_stub and not ad.get('artist'):
                     ad['artist'] = artist_stub
@@ -704,6 +736,49 @@ class DeezerClient:
             return artists
         except Exception as e:
             logger.error(f"Error fetching Deezer favorite artists: {e}")
+            return []
+
+    @rate_limited
+    def get_user_favorite_albums(self, limit: int = 200) -> list:
+        """Fetch user's favorite albums from Deezer. Requires OAuth access token.
+        Returns list of dicts with deezer_id, album_name, artist_name, image_url, release_date, total_tracks."""
+        if not self._access_token:
+            logger.debug("Deezer not user-authenticated — cannot fetch favorite albums")
+            return []
+        try:
+            albums = []
+            index = 0
+            while len(albums) < limit:
+                data = self._api_get('user/me/albums', params={
+                    'limit': min(100, limit - len(albums)),
+                    'index': index
+                })
+                if not data or 'data' not in data:
+                    break
+                items = data['data']
+                if not items:
+                    break
+                for a in items:
+                    artist_name = ''
+                    if isinstance(a.get('artist'), dict):
+                        artist_name = a['artist'].get('name', '')
+                    albums.append({
+                        'deezer_id': str(a.get('id', '')),
+                        'album_name': a.get('title', ''),
+                        'artist_name': artist_name,
+                        'image_url': a.get('cover_xl') or a.get('cover_big') or a.get('cover_medium', ''),
+                        'release_date': a.get('release_date', ''),
+                        'total_tracks': a.get('nb_tracks', 0),
+                    })
+                if not data.get('next'):
+                    break
+                index += len(items)
+                time.sleep(0.3)
+
+            logger.info(f"Retrieved {len(albums)} favorite albums from Deezer")
+            return albums
+        except Exception as e:
+            logger.error(f"Error fetching Deezer favorite albums: {e}")
             return []
 
     # ==================== Stub Methods (match iTunesClient interface) ====================
@@ -1039,7 +1114,7 @@ class DeezerClient:
                 'name': data.get('title', ''),
                 'description': data.get('description', ''),
                 'track_count': total_tracks,
-                'image_url': data.get('picture_medium', ''),
+                'image_url': data.get('picture_xl') or data.get('picture_big') or data.get('picture_medium', ''),
                 'owner': data.get('creator', {}).get('name', ''),
                 'tracks': tracks,
             }
