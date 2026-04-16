@@ -120,7 +120,11 @@ class TidalClient:
         self.alt_base_url = "https://api.tidal.com/v1"  # Alternative API base
         self.auth_url = "https://login.tidal.com/authorize"
         self.token_url = "https://auth.tidal.com/v1/oauth2/token"
-        _tidal_port = int(os.environ.get('SOULSYNC_TIDAL_CALLBACK_PORT', 8889))
+        try:
+            _tidal_port = int(os.environ.get('SOULSYNC_TIDAL_CALLBACK_PORT', 8889))
+        except ValueError:
+            logger.warning("SOULSYNC_TIDAL_CALLBACK_PORT is not a valid integer; falling back to 8889")
+            _tidal_port = 8889
         self.redirect_uri = f"http://127.0.0.1:{_tidal_port}/tidal/callback"  # Default, will be updated from config
         self.session = requests.Session()
         self.auth_server = None
@@ -350,6 +354,10 @@ class TidalClient:
         
         try:
             port = int(os.environ.get('SOULSYNC_TIDAL_CALLBACK_PORT', 8889))
+        except ValueError:
+            logger.warning("SOULSYNC_TIDAL_CALLBACK_PORT is not a valid integer; falling back to 8889")
+            port = 8889
+        try:
             self.auth_server = HTTPServer(('localhost', port), CallbackHandler)
             server_thread = threading.Thread(target=self.auth_server.serve_forever)
             server_thread.daemon = True
