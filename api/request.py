@@ -49,6 +49,7 @@ def _run_search_and_download(request_id, query, notify_url):
                 if request_id in _pending_requests:
                     _pending_requests[request_id]['status'] = 'failed'
                     _pending_requests[request_id]['error'] = 'Download source not configured'
+                    _pending_requests[request_id]['completed_at'] = datetime.now().isoformat()
             return
 
         result = run_async(soulseek.search_and_download_best(query))
@@ -61,7 +62,7 @@ def _run_search_and_download(request_id, query, notify_url):
                 else:
                     _pending_requests[request_id]['status'] = 'not_found'
                     _pending_requests[request_id]['error'] = 'No match found'
-                _pending_requests[request_id]['completed_at'] = datetime.now().isoformat()
+                    _pending_requests[request_id]['completed_at'] = datetime.now().isoformat()
 
         # Send notification to callback URL if provided
         if notify_url:
